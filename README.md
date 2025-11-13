@@ -52,7 +52,27 @@ VOLVO_API_BASE_URL=https://api.volvocars.com
 VOLVO_AUTH_BASE_URL=https://volvoid.eu.volvocars.com
 ```
 
-### 3. Run the Example
+### 3. Authenticate with Volvo API
+
+For first-time authentication, use the interactive authentication helper:
+
+```bash
+python authenticate.py
+```
+
+This will:
+1. Generate an authorization URL
+2. Open it in your browser (or guide you to do so manually)
+3. Walk you through the OAuth2 flow
+4. Save your tokens for future use
+
+Alternatively, you can add the `--auth` flag to the main script:
+
+```bash
+python volvo_battery_mqtt.py --auth
+```
+
+### 4. Run the Example
 
 ```bash
 python example.py

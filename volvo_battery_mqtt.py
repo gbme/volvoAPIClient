@@ -104,9 +104,10 @@ class VolvoBatteryMQTTPublisher:
             # Check authentication
             if not self.auth.is_authenticated():
                 self.logger.error("❌ Authentication required - tokens may be expired")
+                self.logger.error("💡 To authenticate for the first time, run: python authenticate.py")
                 return {
-                    "error": "authentication_required",
-                    "message": "No valid authentication",
+                    "error": "authentication_required", 
+                    "message": "No valid authentication. Run 'python authenticate.py' to set up authentication.",
                 }
 
             # Initialize result structure
@@ -494,8 +495,20 @@ def main():
         action="store_true",
         help="Show equivalent curl commands for debugging API authentication",
     )
+    parser.add_argument(
+        "--auth",
+        action="store_true",
+        help="Run initial authentication setup (same as running 'python authenticate.py')",
+    )
 
     args = parser.parse_args()
+
+    # Handle authentication flag
+    if args.auth:
+        import subprocess
+        print("🔐 Running authentication setup...")
+        result = subprocess.run([sys.executable, "authenticate.py"], check=False)
+        sys.exit(result.returncode)
 
     try:
         # Initialize publisher
