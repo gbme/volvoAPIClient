@@ -24,6 +24,8 @@ class VolvoConfig:
         # Energy API v2 scopes
         "energy:state:read",
         "energy:capability:read",
+        # Location API scope
+        "location:read",
     ]
 
     BASIC_SCOPES = [
