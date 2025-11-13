@@ -1,0 +1,520 @@
+#!/usr/bin/env python3
+"""
+Volvo Battery Monitor - MQTT Publisher
+
+This script:
+1. Gets battery charge level for VIN YV1XZEFV9P2111126
+2. Sends the data via MQTT HTTP API every 5 minutes
+3. Includes comprehensive logging and error handling
+4. Can be run as a cron job or systemd service
+
+Usage:
+    # Run once
+    python volvo_battery_mqtt.py
+
+    # Run in background loop (every 5 minutes)
+    python volvo_battery_mqtt.py --loop
+
+    # Test mode (run once with debug output)
+    python volvo_battery_mqtt.py --test
+"""
+
+import argparse
+import json
+import logging
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import requests
+
+# Add current directory to path for imports
+sys.path.append(".")
+
+from volvo_api import VolvoAPIClient, VolvoAuth
+from volvo_api.config import VolvoConfig
+
+
+class VolvoBatteryMQTTPublisher:
+    """Volvo Battery Level MQTT Publisher"""
+
+    # Configuration
+    TARGET_VIN = "YV1XZEFV9P2111126"
+    MQTT_API_URL = (
+        "http://192.168.1.200:15672/api/exchanges/gbme_vhost/gbme_exchange/publish"
+    )
+
+    def __init__(self, test_mode=False, test_auth=False):
+        """Initialize the publisher"""
+        self.test_mode = test_mode
+        self.test_auth = test_auth
+        self.setup_logging()
+        self.logger = logging.getLogger(__name__)
+
+        # Initialize Volvo API
+        try:
+            self.config = VolvoConfig()
+            self.auth = VolvoAuth(
+                client_id=self.config.client_id,
+                client_secret=self.config.client_secret,
+                redirect_uri=self.config.redirect_uri,
+                scopes=self.config.DEFAULT_SCOPES,
+                use_pkce=True,
+                token_storage_path="tokens.json",
+            )
+            self.client = VolvoAPIClient(
+                auth=self.auth, vcc_api_key=self.config.vcc_api_key
+            )
+            self.logger.info("✅ Volvo API client initialized")
+        except Exception as e:
+            self.logger.error("❌ Failed to initialize Volvo API: %s", str(e))
+            raise
+
+    def setup_logging(self):
+        """Setup logging configuration"""
+        log_level = logging.DEBUG if self.test_mode else logging.INFO
+        log_format = "%(asctime)s - %(levelname)s - %(message)s"
+
+        # Create logs directory
+        Path("logs").mkdir(exist_ok=True)
+
+        # Configure logging
+        logging.basicConfig(
+            level=log_level,
+            format=log_format,
+            handlers=[
+                logging.FileHandler("logs/volvo_battery_mqtt.log"),
+                logging.StreamHandler(sys.stdout),
+            ],
+        )
+
+    def get_battery_and_charging_data(self) -> dict:
+        """
+        Get battery charge level and charging information for the target VIN
+
+        Returns:
+            Dictionary with battery and charging information or error details
+        """
+        try:
+            self.logger.info(
+                "🔋 Getting battery and charging data for VIN: %s", self.TARGET_VIN
+            )
+
+            # Check authentication
+            if not self.auth.is_authenticated():
+                self.logger.error("❌ Authentication required - tokens may be expired")
+                return {
+                    "error": "authentication_required",
+                    "message": "No valid authentication",
+                }
+
+            # Initialize result structure
+            result = {
+                "vin": self.TARGET_VIN,
+                "timestamp": datetime.now().isoformat(),
+                "battery_level": None,
+                "unit": "%",
+                "updated_at": None,
+                "charging_status": None,
+                "charging_current": None,
+                "charging_power": None,
+                "charger_connected": None,
+                "charging_type": None,
+                "source": None,
+            }
+
+            # Try energy state first (Energy API v2) - comprehensive data
+            energy_data_available = False
+            try:
+                # Generate curl commands if test_auth is enabled
+                if self.test_auth:
+                    self._generate_curl_commands(self.TARGET_VIN)
+
+                self.logger.debug("Attempting Energy API v2...")
+                energy_state = self.client.get_energy_state(self.TARGET_VIN)
+                self.logger.debug("Energy state response: %s", energy_state)
+
+                if energy_state:
+                    # Extract battery level
+                    battery_info = energy_state.get("batteryChargeLevel", {})
+                    if battery_info.get("status") == "OK":
+                        result["battery_level"] = battery_info.get("value")
+                        result["updated_at"] = battery_info.get("updatedAt")
+                        result["unit"] = battery_info.get("unit", "%")
+                        energy_data_available = True
+                        result["source"] = "energy_api_v2"
+
+                    # Extract charging status
+                    charging_status_info = energy_state.get("chargingStatus", {})
+                    if charging_status_info.get("status") == "OK":
+                        result["charging_status"] = charging_status_info.get("value")
+
+                    # Extract charging current limit
+                    charging_current_info = energy_state.get("chargingCurrentLimit", {})
+                    if charging_current_info.get("status") == "OK":
+                        result["charging_current"] = charging_current_info.get("value")
+
+                    # Extract charging power
+                    charging_power_info = energy_state.get("chargingPower", {})
+                    if charging_power_info.get("status") == "OK":
+                        result["charging_power"] = charging_power_info.get("value")
+
+                    # Extract charger connection status
+                    connection_info = energy_state.get("chargerConnectionStatus", {})
+                    if connection_info.get("status") == "OK":
+                        result["charger_connected"] = connection_info.get("value")
+
+                    # Extract charging type
+                    charging_type_info = energy_state.get("chargingType", {})
+                    if charging_type_info.get("status") == "OK":
+                        result["charging_type"] = charging_type_info.get("value")
+
+                    if energy_data_available:
+                        self.logger.info(
+                            "✅ Data retrieved from Energy API v2: battery=%s%s, charging_status=%s",
+                            result["battery_level"],
+                            result["unit"],
+                            result["charging_status"],
+                        )
+                        return result
+
+            except Exception as e:
+                self.logger.warning(
+                    "⚠️ Energy API v2 failed: %s, trying fuel status API", str(e)
+                )
+
+            # Fallback to fuel status endpoint for battery level
+            if not energy_data_available:
+                try:
+                    self.logger.debug("Attempting fuel status API for battery level...")
+                    fuel_status = self.client.get_fuel_status(self.TARGET_VIN)
+                    self.logger.debug("Fuel status response: %s", fuel_status)
+
+                    # Extract battery level from fuel status
+                    battery_info = fuel_status.get("batteryChargeLevel", {})
+
+                    if battery_info and "value" in battery_info:
+                        result["battery_level"] = battery_info.get("value")
+                        result["updated_at"] = battery_info.get(
+                            "timestamp", datetime.now().isoformat()
+                        )
+                        result["unit"] = battery_info.get("unit", "%")
+                        result["source"] = "fuel_status_api"
+
+                        self.logger.info(
+                            "✅ Battery level retrieved from fuel status API: %s%s",
+                            result["battery_level"],
+                            result["unit"],
+                        )
+                    else:
+                        self.logger.error(
+                            "❌ No battery data in fuel status response: %s",
+                            fuel_status,
+                        )
+                        return {
+                            "error": "no_battery_data",
+                            "message": "No battery information available in fuel status",
+                            "vin": self.TARGET_VIN,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+
+                except Exception as fuel_error:
+                    self.logger.error("❌ Fuel status API failed: %s", str(fuel_error))
+                    return {
+                        "error": "api_failure",
+                        "message": f"All API endpoints failed. Fuel API error: {str(fuel_error)}",
+                        "vin": self.TARGET_VIN,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+
+            # Try to get additional charging information from other endpoints
+            self._enrich_charging_data(result)
+
+            return result
+
+        except Exception as e:
+            self.logger.error(
+                "❌ Unexpected error getting battery and charging data: %s", str(e)
+            )
+            return {
+                "error": "unexpected_error",
+                "message": str(e),
+                "vin": self.TARGET_VIN,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+    def _enrich_charging_data(self, result: dict):
+        """
+        Try to get additional charging information from other endpoints
+
+        Args:
+            result: Dictionary to enrich with charging data
+        """
+        try:
+            # Try to get engine status (might have charging info)
+            try:
+                self.logger.debug(
+                    "Attempting to get engine status for charging data..."
+                )
+                engine_status = self.client.get_engine_status(self.TARGET_VIN)
+                print(engine_status)
+                self.logger.debug("Engine status response: %s", engine_status)
+
+                # Look for any charging-related fields in engine status
+                # (This is speculative - actual field names may vary)
+                if engine_status and isinstance(engine_status, dict):
+                    for key, value in engine_status.items():
+                        if "charg" in key.lower():
+                            self.logger.debug(
+                                "Found charging-related field in engine status: %s = %s",
+                                key,
+                                value,
+                            )
+
+            except Exception as e:
+                self.logger.debug("Engine status API unavailable: %s", str(e))
+
+            # For now, if we don't have charging status, infer it from battery level and time
+            if result.get("charging_status") is None:
+                battery_level = result.get("battery_level")
+                if battery_level is not None:
+                    if battery_level >= 95:
+                        result["charging_status"] = (
+                            "IDLE"  # Likely not charging if nearly full
+                        )
+                    else:
+                        result["charging_status"] = (
+                            "UNKNOWN"  # Cannot determine without more data
+                        )
+
+            # Set default values for missing charging data
+            if result.get("charging_current") is None:
+                result["charging_current"] = "N/A"
+            if result.get("charging_power") is None:
+                result["charging_power"] = "N/A"
+            if result.get("charger_connected") is None:
+                result["charger_connected"] = "UNKNOWN"
+            if result.get("charging_type") is None:
+                result["charging_type"] = "N/A"
+
+        except Exception as e:
+            self.logger.debug("Error enriching charging data: %s", str(e))
+
+    def publish_to_mqtt(self, data: dict) -> bool:
+        """
+        Publish data to MQTT via HTTP API
+
+        Args:
+            data: Dictionary containing battery data or error information
+
+        Returns:
+            True if published successfully, False otherwise
+        """
+        try:
+            # Prepare MQTT message
+            mqtt_message = {
+                "properties": {},
+                "routing_key": "volvo.car.YV1XZEFV9P2111126",
+                "payload": json.dumps(data),
+                "payload_encoding": "string",
+            }
+
+            self.logger.info(
+                "📡 Publishing to MQTT: routing_key=%s", mqtt_message["routing_key"]
+            )
+
+            if self.test_mode:
+                self.logger.info(
+                    "🧪 TEST MODE - Would publish: %s",
+                    json.dumps(mqtt_message, indent=2),
+                )
+                return True
+
+            # Make HTTP POST request to MQTT API with proper headers
+            headers = {
+                "Authorization": "Basic Z2JtZTpwYXNz",
+                "Content-Type": "application/json",
+            }
+
+            response = requests.post(
+                self.MQTT_API_URL,
+                json=mqtt_message,
+                headers=headers,
+                timeout=10,
+            )
+
+            if response.status_code in [200, 201]:
+                self.logger.info("✅ Successfully published to MQTT")
+                return True
+            else:
+                self.logger.error(
+                    "❌ MQTT publish failed: HTTP %s - %s",
+                    response.status_code,
+                    response.text,
+                )
+                return False
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error("❌ Network error publishing to MQTT: %s", str(e))
+            return False
+        except Exception as e:
+            self.logger.error("❌ Unexpected error publishing to MQTT: %s", str(e))
+            return False
+
+    def _generate_curl_commands(self, vin):
+        """Generate curl commands for debugging API calls"""
+        if not self.client or not hasattr(self.client, "auth"):
+            print("❌ No authenticated client available for curl generation")
+            return
+
+        token = self.client.auth.get_access_token()
+        if not token:
+            print("❌ No access token available for curl generation")
+            return
+
+        # Base curl command with authentication
+        base_curl = f'curl -X GET \\\n  -H "Authorization: Bearer {token}" \\\n  -H "VCC-Api-Key: {self.client.vcc_api_key}" \\\n  -H "Content-Type: application/json"'
+
+        print("\n🔍 DEBUG: Equivalent curl commands for API calls:")
+        print("=" * 60)
+
+        # Energy API v2 endpoints
+        print("\n1. Energy State API:")
+        energy_url = f"https://api.volvocars.com/energy/v2/vehicles/{vin}"
+        print(f'{base_curl} \\\n  "{energy_url}"')
+
+        print("\n2. Energy Capabilities API:")
+        capabilities_url = (
+            f"https://api.volvocars.com/energy/v2/vehicles/{vin}/capabilities"
+        )
+        print(f'{base_curl} \\\n  "{capabilities_url}"')
+
+        # Fallback fuel status API
+        print("\n3. Fuel Status API (fallback):")
+        fuel_url = f"https://api.volvocars.com/connected-vehicle/v2/vehicles/{vin}/fuel"
+        print(f'{base_curl} \\\n  "{fuel_url}"')
+
+        print("\n" + "=" * 60)
+        print(
+            "Note: Replace the bearer token if it expires (tokens are valid for ~1 hour)"
+        )
+        print()
+
+    def run_once(self) -> bool:
+        """
+        Run once: get battery level and publish to MQTT
+
+        Returns:
+            True if successful, False otherwise
+        """
+        self.logger.info("🚗 Starting Volvo battery monitoring cycle")
+
+        try:
+            # Get battery and charging data
+            battery_data = self.get_battery_and_charging_data()
+
+            # Publish to MQTT
+            success = self.publish_to_mqtt(battery_data)
+
+            if success:
+                if "error" not in battery_data:
+                    battery_level = battery_data.get("battery_level", "N/A")
+                    unit = battery_data.get("unit", "")
+                    charging_status = battery_data.get("charging_status", "N/A")
+                    charging_power = battery_data.get("charging_power", "N/A")
+
+                    self.logger.info(
+                        "✅ Cycle completed - Battery: %s%s, Charging: %s, Power: %s",
+                        battery_level,
+                        unit,
+                        charging_status,
+                        charging_power,
+                    )
+                else:
+                    self.logger.warning("⚠️ Cycle completed with error data published")
+                return True
+            else:
+                self.logger.error("❌ Cycle failed - could not publish to MQTT")
+                return False
+
+        except Exception as e:
+            self.logger.error("❌ Cycle failed with exception: %s", str(e))
+            return False
+
+    def run_loop(self, interval_minutes: int = 5):
+        """
+        Run continuously every interval_minutes
+
+        Args:
+            interval_minutes: How often to run (default: 5 minutes)
+        """
+        self.logger.info(
+            "🔄 Starting continuous monitoring (every %d minutes)", interval_minutes
+        )
+        interval_seconds = interval_minutes * 60
+
+        try:
+            while True:
+                # Run monitoring cycle
+                self.run_once()
+
+                # Wait for next cycle
+                self.logger.info(
+                    "⏰ Waiting %d minutes until next cycle...", interval_minutes
+                )
+                time.sleep(interval_seconds)
+
+        except KeyboardInterrupt:
+            self.logger.info("👋 Received stop signal, shutting down gracefully")
+        except Exception as e:
+            self.logger.error("❌ Loop failed with exception: %s", str(e))
+            raise
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(description="Volvo Battery MQTT Publisher")
+    parser.add_argument(
+        "--loop", action="store_true", help="Run continuously every 5 minutes"
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Test mode - debug output, no actual MQTT publish",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=5,
+        help="Interval in minutes for loop mode (default: 5)",
+    )
+    parser.add_argument(
+        "--test_auth",
+        action="store_true",
+        help="Show equivalent curl commands for debugging API authentication",
+    )
+
+    args = parser.parse_args()
+
+    try:
+        # Initialize publisher
+        publisher = VolvoBatteryMQTTPublisher(
+            test_mode=args.test, test_auth=args.test_auth
+        )
+
+        if args.loop:
+            # Run continuously
+            publisher.run_loop(interval_minutes=args.interval)
+        else:
+            # Run once
+            success = publisher.run_once()
+            sys.exit(0 if success else 1)
+
+    except Exception as e:
+        logging.error("❌ Application failed: %s", str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
