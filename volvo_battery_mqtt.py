@@ -56,12 +56,12 @@ class VolvoBatteryMQTTPublisher:
         # "YV1XZEFV9P3333333",  # Third vehicle VIN
         # "WVWZZZ3CZKE123456",  # Example: Another Volvo VIN format
     ]
-    
+
     # Home location configuration (replace with your actual home coordinates)
     HOME_LATITUDE = 52.21389700028309  # Replace with your home latitude
     HOME_LONGITUDE = 5.179792579410594  # Replace with your home longitude
     HOME_RADIUS_METERS = 100  # Radius in meters to consider as "home"
-    
+
     MQTT_API_URL = (
         "http://192.168.1.200:15672/api/exchanges/gbme_vhost/gbme_exchange/publish"
     )
@@ -164,15 +164,8 @@ class VolvoBatteryMQTTPublisher:
                 "charger_connected": None,
                 "charging_type": None,
                 "source": None,
-                # Location data
-                "location": {
-                    "latitude": None,
-                    "longitude": None,
-                    "heading": None,
-                    "speed": None,
-                    "updated_at": None,
-                    "status": None,
-                },
+                # Location data - simplified to just 'home' or 'unknown'
+                "location": "unknown",
             }
 
             # Try energy state first (Energy API v2) - comprehensive data
@@ -363,14 +356,16 @@ class VolvoBatteryMQTTPublisher:
         except Exception as e:
             self.logger.debug("Error enriching charging data: %s", str(e))
 
-    def _calculate_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    def _calculate_distance(
+        self, lat1: float, lon1: float, lat2: float, lon2: float
+    ) -> float:
         """
         Calculate the distance between two GPS coordinates using the Haversine formula
-        
+
         Args:
             lat1, lon1: First coordinate pair (latitude, longitude)
             lat2, lon2: Second coordinate pair (latitude, longitude)
-            
+
         Returns:
             Distance in meters
         """
@@ -379,17 +374,20 @@ class VolvoBatteryMQTTPublisher:
         lon1_rad = math.radians(lon1)
         lat2_rad = math.radians(lat2)
         lon2_rad = math.radians(lon2)
-        
+
         # Haversine formula
         dlat = lat2_rad - lat1_rad
         dlon = lon2_rad - lon1_rad
-        
-        a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-        
+
+        a = (
+            math.sin(dlat / 2) ** 2
+            + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
+        )
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
         # Earth's radius in meters
         earth_radius_m = 6371000
-        
+
         # Distance in meters
         distance = earth_radius_m * c
         return distance
@@ -397,23 +395,22 @@ class VolvoBatteryMQTTPublisher:
     def _is_at_home(self, latitude: float, longitude: float) -> bool:
         """
         Check if the given coordinates are within the home radius
-        
+
         Args:
             latitude: Vehicle latitude
             longitude: Vehicle longitude
-            
+
         Returns:
             True if within home radius, False otherwise
         """
         distance = self._calculate_distance(
-            latitude, longitude, 
-            self.HOME_LATITUDE, self.HOME_LONGITUDE
+            latitude, longitude, self.HOME_LATITUDE, self.HOME_LONGITUDE
         )
         return distance <= self.HOME_RADIUS_METERS
 
     def _get_location_data(self, result: dict, vin: str):
         """
-        Get vehicle location information
+        Get vehicle location information and simplify to 'home' or 'unknown'
 
         Args:
             result: Dictionary to enrich with location data
@@ -430,59 +427,48 @@ class VolvoBatteryMQTTPublisher:
                 if geometry and "coordinates" in geometry:
                     coordinates = geometry["coordinates"]
                     if len(coordinates) >= 2:
-                        result["location"]["longitude"] = coordinates[0]
-                        result["location"]["latitude"] = coordinates[1]
+                        lon = coordinates[0]
+                        lat = coordinates[1]
 
-                # Extract location properties
-                properties = location_data.get("properties", {})
-                if properties:
-                    result["location"]["heading"] = properties.get("heading")
-                    result["location"]["speed"] = properties.get("speed")
-                    result["location"]["updated_at"] = properties.get("timestamp")
-                    result["location"]["status"] = "OK"
+                        # Extract location properties for logging
+                        properties = location_data.get("properties", {})
+                        heading = properties.get("heading")
 
-                    # Check if vehicle is at home
-                    lat = result["location"]["latitude"]
-                    lon = result["location"]["longitude"]
-                    
-                    if lat is not None and lon is not None and self._is_at_home(lat, lon):
-                        # Vehicle is at home - simplify location data
-                        distance_to_home = self._calculate_distance(lat, lon, self.HOME_LATITUDE, self.HOME_LONGITUDE)
-                        
-                        result["location"] = {
-                            "location": "home",
-                            "distance_from_home": round(distance_to_home, 1),
-                            "heading": properties.get("heading"),
-                            "updated_at": properties.get("timestamp"),
-                            "status": "OK"
-                        }
-                        
-                        self.logger.info(
-                            "✅ [%s] Location: 🏠 home (%.1fm from center), heading=%s°",
-                            vin,
-                            distance_to_home,
-                            result["location"]["heading"] or "N/A"
-                        )
-                    else:
-                        # Vehicle is away from home - keep detailed coordinates
-                        self.logger.info(
-                            "✅ [%s] Location retrieved: lat=%.6f, lon=%.6f, heading=%s°",
-                            vin,
-                            lat or 0,
-                            lon or 0,
-                            result["location"]["heading"] or "N/A"
-                        )
-                else:
-                    self.logger.debug("No location properties found in response")
-                    result["location"]["status"] = "NO_DATA"
+                        # Check if vehicle is at home
+                        if self._is_at_home(lat, lon):
+                            # Vehicle is at home - set location to 'home'
+                            distance_to_home = self._calculate_distance(
+                                lat, lon, self.HOME_LATITUDE, self.HOME_LONGITUDE
+                            )
+
+                            result["location"] = "home"
+
+                            self.logger.info(
+                                "✅ [%s] Location: 🏠 home (%.1fm from center), heading=%s°",
+                                vin,
+                                distance_to_home,
+                                heading or "N/A",
+                            )
+                        else:
+                            # Vehicle is away from home - set location to 'unknown'
+                            result["location"] = "unknown"
+                            self.logger.info(
+                                "✅ [%s] Location: 📍 unknown (away from home), heading=%s°",
+                                vin,
+                                heading or "N/A",
+                            )
+                        return
+
+                # No valid coordinates found
+                self.logger.debug("No valid coordinates found in response")
+                result["location"] = "unknown"
             else:
                 self.logger.debug("No location data available")
-                result["location"]["status"] = "NO_DATA"
+                result["location"] = "unknown"
 
         except Exception as e:
             self.logger.debug("Location API failed: %s", str(e))
-            result["location"]["status"] = "ERROR"
-            result["location"]["error"] = str(e)
+            result["location"] = "unknown"
 
     def publish_to_mqtt(self, data: dict) -> bool:
         """
@@ -505,7 +491,7 @@ class VolvoBatteryMQTTPublisher:
                 "payload": json.dumps(data),
                 "payload_encoding": "string",
             }
-
+            print(mqtt_message)
             self.logger.info(
                 "📡 Publishing to MQTT: routing_key=%s", mqtt_message["routing_key"]
             )
@@ -622,24 +608,17 @@ class VolvoBatteryMQTTPublisher:
                         unit = battery_data.get("unit", "")
                         charging_status = battery_data.get("charging_status", "N/A")
                         charging_power = battery_data.get("charging_power", "N/A")
-                        
+
                         # Get location info for logging
-                        location = battery_data.get("location", {})
-                        location_status = location.get("status", "N/A")
-                        
-                        # Check if location is simplified to "home"
-                        if location.get("location") == "home":
-                            distance = location.get("distance_from_home", 0)
-                            location_str = f"🏠 home ({distance}m)"
+                        location = battery_data.get("location", "N/A")
+
+                        # Check if location is simplified format
+                        if location == "home":
+                            location_str = "🏠 home"
+                        elif location == "unknown":
+                            location_str = "📍 unknown"
                         else:
-                            # Traditional lat/lon format
-                            lat = location.get("latitude")
-                            lon = location.get("longitude")
-                            
-                            if lat is not None and lon is not None:
-                                location_str = f"📍 {lat:.6f},{lon:.6f}"
-                            else:
-                                location_str = f"📍 {location_status}"
+                            location_str = f"📍 {location}"
 
                         self.logger.info(
                             "✅ [%s] Completed - Battery: %s%s, Charging: %s, Power: %s, Location: %s",
