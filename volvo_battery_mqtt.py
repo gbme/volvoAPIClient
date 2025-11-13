@@ -3,20 +3,27 @@
 Volvo Battery Monitor - MQTT Publisher
 
 This script:
-1. Gets battery charge level for VIN YV1XZEFV9P2111126
+1. Gets battery charge level for multiple Volvo vehicles
 2. Sends the data via MQTT HTTP API every 5 minutes
 3. Includes comprehensive logging and error handling
 4. Can be run as a cron job or systemd service
+5. Supports multiple VINs (configured in TARGET_VINS or via --vins argument)
 
 Usage:
-    # Run once
+    # Run once for all configured VINs
     python volvo_battery_mqtt.py
+
+    # Run for specific VINs
+    python volvo_battery_mqtt.py --vins "VIN1,VIN2,VIN3"
 
     # Run in background loop (every 5 minutes)
     python volvo_battery_mqtt.py --loop
 
     # Test mode (run once with debug output)
     python volvo_battery_mqtt.py --test
+
+    # First-time authentication setup
+    python volvo_battery_mqtt.py --auth
 """
 
 import argparse
@@ -39,18 +46,42 @@ from volvo_api.config import VolvoConfig
 class VolvoBatteryMQTTPublisher:
     """Volvo Battery Level MQTT Publisher"""
 
-    # Configuration
-    TARGET_VIN = "YV1XZEFV9P2111126"
+    # Configuration - Add your vehicle VINs here
+    TARGET_VINS = [
+        "YV1XZEFV9P2111126",  # Replace with your actual VIN(s)
+        "YV1LFBABDJ1371367",  # Second vehicle VIN
+        # Add more VINs here as needed:
+        # "YV1XZEFV9P2222222",  # Second vehicle VIN
+        # "YV1XZEFV9P3333333",  # Third vehicle VIN
+        # "WVWZZZ3CZKE123456",  # Example: Another Volvo VIN format
+    ]
     MQTT_API_URL = (
         "http://192.168.1.200:15672/api/exchanges/gbme_vhost/gbme_exchange/publish"
     )
 
-    def __init__(self, test_mode=False, test_auth=False):
-        """Initialize the publisher"""
+    def __init__(self, test_mode=False, test_auth=False, vins=None):
+        """Initialize the publisher
+
+        Args:
+            test_mode: Enable test mode (no MQTT publishing)
+            test_auth: Show curl commands for debugging
+            vins: List of VINs to monitor (overrides default TARGET_VINS)
+        """
         self.test_mode = test_mode
         self.test_auth = test_auth
+
+        # Use provided VINs or fall back to default
+        self.TARGET_VINS = vins if vins is not None else self.TARGET_VINS
+
         self.setup_logging()
         self.logger = logging.getLogger(__name__)
+
+        # Log which VINs will be monitored
+        self.logger.info(
+            "📋 Configured to monitor %d vehicle(s): %s",
+            len(self.TARGET_VINS),
+            ", ".join(self.TARGET_VINS),
+        )
 
         # Initialize Volvo API
         try:
@@ -89,30 +120,33 @@ class VolvoBatteryMQTTPublisher:
             ],
         )
 
-    def get_battery_and_charging_data(self) -> dict:
+    def get_battery_and_charging_data(self, vin: str) -> dict:
         """
-        Get battery charge level and charging information for the target VIN
+        Get battery charge level and charging information for the specified VIN
+
+        Args:
+            vin: Vehicle identification number
 
         Returns:
             Dictionary with battery and charging information or error details
         """
         try:
-            self.logger.info(
-                "🔋 Getting battery and charging data for VIN: %s", self.TARGET_VIN
-            )
+            self.logger.info("🔋 Getting battery and charging data for VIN: %s", vin)
 
             # Check authentication
             if not self.auth.is_authenticated():
                 self.logger.error("❌ Authentication required - tokens may be expired")
-                self.logger.error("💡 To authenticate for the first time, run: python authenticate.py")
+                self.logger.error(
+                    "💡 To authenticate for the first time, run: python authenticate.py"
+                )
                 return {
-                    "error": "authentication_required", 
+                    "error": "authentication_required",
                     "message": "No valid authentication. Run 'python authenticate.py' to set up authentication.",
                 }
 
             # Initialize result structure
             result = {
-                "vin": self.TARGET_VIN,
+                "vin": vin,
                 "timestamp": datetime.now().isoformat(),
                 "battery_level": None,
                 "unit": "%",
@@ -130,10 +164,10 @@ class VolvoBatteryMQTTPublisher:
             try:
                 # Generate curl commands if test_auth is enabled
                 if self.test_auth:
-                    self._generate_curl_commands(self.TARGET_VIN)
+                    self._generate_curl_commands(vin)
 
                 self.logger.debug("Attempting Energy API v2...")
-                energy_state = self.client.get_energy_state(self.TARGET_VIN)
+                energy_state = self.client.get_energy_state(vin)
                 self.logger.debug("Energy state response: %s", energy_state)
 
                 if energy_state:
@@ -170,6 +204,10 @@ class VolvoBatteryMQTTPublisher:
                     charging_type_info = energy_state.get("chargingType", {})
                     if charging_type_info.get("status") == "OK":
                         result["charging_type"] = charging_type_info.get("value")
+                    # Extract charging type
+                    charging_limit_info = energy_state.get("chargingCurrentLimit", {})
+                    if charging_limit_info.get("status") == "OK":
+                        result["charging_limit"] = charging_limit_info.get("value")
 
                     if energy_data_available:
                         self.logger.info(
@@ -189,7 +227,7 @@ class VolvoBatteryMQTTPublisher:
             if not energy_data_available:
                 try:
                     self.logger.debug("Attempting fuel status API for battery level...")
-                    fuel_status = self.client.get_fuel_status(self.TARGET_VIN)
+                    fuel_status = self.client.get_fuel_status(vin)
                     self.logger.debug("Fuel status response: %s", fuel_status)
 
                     # Extract battery level from fuel status
@@ -216,7 +254,7 @@ class VolvoBatteryMQTTPublisher:
                         return {
                             "error": "no_battery_data",
                             "message": "No battery information available in fuel status",
-                            "vin": self.TARGET_VIN,
+                            "vin": vin,
                             "timestamp": datetime.now().isoformat(),
                         }
 
@@ -225,12 +263,12 @@ class VolvoBatteryMQTTPublisher:
                     return {
                         "error": "api_failure",
                         "message": f"All API endpoints failed. Fuel API error: {str(fuel_error)}",
-                        "vin": self.TARGET_VIN,
+                        "vin": vin,
                         "timestamp": datetime.now().isoformat(),
                     }
 
             # Try to get additional charging information from other endpoints
-            self._enrich_charging_data(result)
+            self._enrich_charging_data(result, vin)
 
             return result
 
@@ -241,16 +279,17 @@ class VolvoBatteryMQTTPublisher:
             return {
                 "error": "unexpected_error",
                 "message": str(e),
-                "vin": self.TARGET_VIN,
+                "vin": vin,
                 "timestamp": datetime.now().isoformat(),
             }
 
-    def _enrich_charging_data(self, result: dict):
+    def _enrich_charging_data(self, result: dict, vin: str):
         """
         Try to get additional charging information from other endpoints
 
         Args:
             result: Dictionary to enrich with charging data
+            vin: Vehicle identification number
         """
         try:
             # Try to get engine status (might have charging info)
@@ -258,7 +297,7 @@ class VolvoBatteryMQTTPublisher:
                 self.logger.debug(
                     "Attempting to get engine status for charging data..."
                 )
-                engine_status = self.client.get_engine_status(self.TARGET_VIN)
+                engine_status = self.client.get_engine_status(vin)
                 print(engine_status)
                 self.logger.debug("Engine status response: %s", engine_status)
 
@@ -313,10 +352,13 @@ class VolvoBatteryMQTTPublisher:
             True if published successfully, False otherwise
         """
         try:
+            # Get VIN from data for routing key
+            vin = data.get("vin", "UNKNOWN")
+
             # Prepare MQTT message
             mqtt_message = {
                 "properties": {},
-                "routing_key": "volvo.car.YV1XZEFV9P2111126",
+                "routing_key": f"volvo.car.{vin}",
                 "payload": json.dumps(data),
                 "payload_encoding": "string",
             }
@@ -404,44 +446,59 @@ class VolvoBatteryMQTTPublisher:
 
     def run_once(self) -> bool:
         """
-        Run once: get battery level and publish to MQTT
+        Run once: get battery level and publish to MQTT for all VINs
 
         Returns:
-            True if successful, False otherwise
+            True if all VINs processed successfully, False otherwise
         """
-        self.logger.info("🚗 Starting Volvo battery monitoring cycle")
+        self.logger.info(
+            "🚗 Starting Volvo battery monitoring cycle for %d vehicles",
+            len(self.TARGET_VINS),
+        )
 
-        try:
-            # Get battery and charging data
-            battery_data = self.get_battery_and_charging_data()
+        overall_success = True
 
-            # Publish to MQTT
-            success = self.publish_to_mqtt(battery_data)
+        for vin in self.TARGET_VINS:
+            try:
+                self.logger.info("🔍 Processing VIN: %s", vin)
 
-            if success:
-                if "error" not in battery_data:
-                    battery_level = battery_data.get("battery_level", "N/A")
-                    unit = battery_data.get("unit", "")
-                    charging_status = battery_data.get("charging_status", "N/A")
-                    charging_power = battery_data.get("charging_power", "N/A")
+                # Get battery and charging data for this VIN
+                battery_data = self.get_battery_and_charging_data(vin)
 
-                    self.logger.info(
-                        "✅ Cycle completed - Battery: %s%s, Charging: %s, Power: %s",
-                        battery_level,
-                        unit,
-                        charging_status,
-                        charging_power,
-                    )
+                # Publish to MQTT
+                success = self.publish_to_mqtt(battery_data)
+
+                if success:
+                    if "error" not in battery_data:
+                        battery_level = battery_data.get("battery_level", "N/A")
+                        unit = battery_data.get("unit", "")
+                        charging_status = battery_data.get("charging_status", "N/A")
+                        charging_power = battery_data.get("charging_power", "N/A")
+
+                        self.logger.info(
+                            "✅ [%s] Completed - Battery: %s%s, Charging: %s, Power: %s",
+                            vin,
+                            battery_level,
+                            unit,
+                            charging_status,
+                            charging_power,
+                        )
+                    else:
+                        self.logger.warning(
+                            "⚠️ [%s] Completed with error data published", vin
+                        )
                 else:
-                    self.logger.warning("⚠️ Cycle completed with error data published")
-                return True
-            else:
-                self.logger.error("❌ Cycle failed - could not publish to MQTT")
-                return False
+                    self.logger.error("❌ [%s] Failed - could not publish to MQTT", vin)
+                    overall_success = False
 
-        except Exception as e:
-            self.logger.error("❌ Cycle failed with exception: %s", str(e))
-            return False
+            except Exception as e:
+                self.logger.error("❌ [%s] Failed with exception: %s", vin, str(e))
+                overall_success = False
+
+        self.logger.info(
+            "🏁 Monitoring cycle completed for all %d vehicles", len(self.TARGET_VINS)
+        )
+        return overall_success
 
     def run_loop(self, interval_minutes: int = 5):
         """
@@ -500,20 +557,32 @@ def main():
         action="store_true",
         help="Run initial authentication setup (same as running 'python authenticate.py')",
     )
+    parser.add_argument(
+        "--vins",
+        type=str,
+        help="Comma-separated list of VINs to monitor (overrides default list)",
+    )
 
     args = parser.parse_args()
 
     # Handle authentication flag
     if args.auth:
         import subprocess
+
         print("🔐 Running authentication setup...")
         result = subprocess.run([sys.executable, "authenticate.py"], check=False)
         sys.exit(result.returncode)
 
     try:
+        # Parse VINs from command line
+        vins = None
+        if args.vins:
+            vins = [vin.strip() for vin in args.vins.split(",") if vin.strip()]
+            print(f"📋 Using VINs from command line: {vins}")
+
         # Initialize publisher
         publisher = VolvoBatteryMQTTPublisher(
-            test_mode=args.test, test_auth=args.test_auth
+            test_mode=args.test, test_auth=args.test_auth, vins=vins
         )
 
         if args.loop:
