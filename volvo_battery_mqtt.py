@@ -62,6 +62,11 @@ class VolvoBatteryMQTTPublisher:
     HOME_LONGITUDE = 5.179792579410594  # Replace with your home longitude
     HOME_RADIUS_METERS = 100  # Radius in meters to consider as "home"
 
+    # Friesland location configuration (current location of YV1XZEFV9P2111126)
+    FRIESLAND_LATITUDE = 52.868868853784726  # Current Friesland coordinates
+    FRIESLAND_LONGITUDE = 5.837393220057187  # Current Friesland coordinates
+    FRIESLAND_RADIUS_METERS = 100  # Radius in meters to consider as "Friesland"
+
     MQTT_API_URL = (
         "http://192.168.1.200:15672/api/exchanges/gbme_vhost/gbme_exchange/publish"
     )
@@ -408,6 +413,22 @@ class VolvoBatteryMQTTPublisher:
         )
         return distance <= self.HOME_RADIUS_METERS
 
+    def _is_in_friesland(self, latitude: float, longitude: float) -> bool:
+        """
+        Check if the given coordinates are within the Friesland radius
+
+        Args:
+            latitude: Vehicle latitude
+            longitude: Vehicle longitude
+
+        Returns:
+            True if within Friesland radius, False otherwise
+        """
+        distance = self._calculate_distance(
+            latitude, longitude, self.FRIESLAND_LATITUDE, self.FRIESLAND_LONGITUDE
+        )
+        return distance <= self.FRIESLAND_RADIUS_METERS
+
     def _get_location_data(self, result: dict, vin: str):
         """
         Get vehicle location information and simplify to 'home' or 'unknown'
@@ -434,9 +455,23 @@ class VolvoBatteryMQTTPublisher:
                         properties = location_data.get("properties", {})
                         heading = properties.get("heading")
 
-                        # Check if vehicle is at home
-                        if self._is_at_home(lat, lon):
-                            # Vehicle is at home - set location to 'home'
+                        # Check location priority: Friesland -> Home -> Unknown
+                        if vin == "YV1XZEFV9P2111126" and self._is_in_friesland(lat, lon):
+                            # This specific VIN is in Friesland
+                            result["location"] = "Friesland"
+                            
+                            distance_to_friesland = self._calculate_distance(
+                                lat, lon, self.FRIESLAND_LATITUDE, self.FRIESLAND_LONGITUDE
+                            )
+                            
+                            self.logger.info(
+                                "✅ [%s] Location: 🌍 Friesland (%.1fm from center), heading=%s°",
+                                vin,
+                                distance_to_friesland,
+                                heading or "N/A",
+                            )
+                        elif self._is_at_home(lat, lon):
+                            # Vehicle is at home location
                             distance_to_home = self._calculate_distance(
                                 lat, lon, self.HOME_LATITUDE, self.HOME_LONGITUDE
                             )
@@ -450,10 +485,10 @@ class VolvoBatteryMQTTPublisher:
                                 heading or "N/A",
                             )
                         else:
-                            # Vehicle is away from home - set location to 'unknown'
+                            # Vehicle is away from known locations - set location to 'unknown'
                             result["location"] = "unknown"
                             self.logger.info(
-                                "✅ [%s] Location: 📍 unknown (away from home), heading=%s°",
+                                "✅ [%s] Location: 📍 unknown (away from known locations), heading=%s°",
                                 vin,
                                 heading or "N/A",
                             )
@@ -615,6 +650,8 @@ class VolvoBatteryMQTTPublisher:
                         # Check if location is simplified format
                         if location == "home":
                             location_str = "🏠 home"
+                        elif location == "Friesland":
+                            location_str = "🌍 Friesland"
                         elif location == "unknown":
                             location_str = "📍 unknown"
                         else:
