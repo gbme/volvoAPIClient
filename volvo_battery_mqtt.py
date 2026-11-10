@@ -222,6 +222,10 @@ class VolvoBatteryMQTTPublisher:
                     charging_limit_info = energy_state.get("chargingCurrentLimit", {})
                     if charging_limit_info.get("status") == "OK":
                         result["charging_limit"] = charging_limit_info.get("value")
+                    # Charge limit (%) set in the car / Volvo app
+                    target_info = energy_state.get("targetBatteryChargeLevel", {})
+                    if target_info.get("status") == "OK":
+                        result["target_battery_level"] = target_info.get("value")
 
                     if energy_data_available:
                         self.logger.info(
