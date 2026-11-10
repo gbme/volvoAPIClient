@@ -1,0 +1,197 @@
+---
+# Eenmalig (en veilig om te herhalen): python3/venv, systeemgebruiker, mappen, config,
+# systemd-service + timer en het helperscript volvo-authenticate; daarna de eerste deploy.
+# Neemt de oude installatie over: haalt de cron weg (eerst wachten op een lopende run) en
+# kopieert tokens.json één keer, zodat de lopende Volvo-login blijft werken.
+- name: Server inrichten voor de Volvo API client
+  hosts: volvo_api_client
+  become: true
+
+  tasks:
+    - name: Alleen Debian/Ubuntu wordt ondersteund
+      ansible.builtin.assert:
+        that: ansible_facts.os_family == 'Debian'
+        fail_msg: "Niet ondersteund: {{ ansible_facts.distribution }}"
+
+    - name: Basispakketten
+      ansible.builtin.apt:
+        name: [python3, python3-venv, acl]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Python-versie
+      ansible.builtin.command: python3 -c "import sys; print('%d.%d' % sys.version_info[:2])"
+      register: python_version
+      changed_when: false
+      check_mode: false
+
+    - name: Python is recent genoeg
+      ansible.builtin.assert:
+        that: python_version.stdout is version(python_min_version, '>=')
+        fail_msg: "python3 {{ python_version.stdout }} is te oud, minimaal {{ python_min_version }}"
+
+    - name: Systeemgebruiker {{ app_user }}
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        home: "{{ app_data }}"
+        create_home: false
+        shell: /usr/sbin/nologin
+
+    - name: Codemap (root)
+      ansible.builtin.file:
+        path: "{{ app_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # Releases en venv zijn van de deploy-gebruiker; de app-gebruiker kan ze alleen lezen.
+    - name: Release- en venvmap
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+      loop: ["{{ app_releases }}", "{{ app_venv }}"]
+
+    - name: Datamap (tokens)
+      ansible.builtin.file:
+        path: "{{ app_data }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0700"
+
+    - name: Bestaat de logmap al?
+      ansible.builtin.stat:
+        path: "{{ log_dir }}"
+      register: log_dir_stat
+
+    - name: Logmap {{ log_dir }} aanmaken
+      ansible.builtin.file:
+        path: "{{ log_dir }}"
+        state: directory
+        owner: "{{ log_owner }}"
+        group: "{{ log_owner }}"
+        mode: "0755"
+      when: not log_dir_stat.stat.exists
+
+    - name: Doorgang door de home van {{ log_owner }}
+      ansible.posix.acl:
+        path: "{{ log_dir | dirname }}"
+        entity: "{{ app_user }}"
+        etype: user
+        permissions: x
+        state: present
+
+    - name: Schrijfrecht in de logmap
+      ansible.posix.acl:
+        path: "{{ log_dir }}"
+        entity: "{{ app_user }}"
+        etype: user
+        permissions: rwx
+        state: present
+
+    - name: Standaard-ACL in de logmap
+      ansible.posix.acl:
+        path: "{{ log_dir }}"
+        entity: "{{ item }}"
+        etype: user
+        permissions: rwx
+        default: true
+        state: present
+      loop: ["{{ app_user }}", "{{ log_owner }}"]
+
+    - name: Configmap
+      ansible.builtin.file:
+        path: "{{ app_env_dir }}"
+        state: directory
+        owner: root
+        group: "{{ app_user }}"
+        mode: "0750"
+
+    - name: Configuratie
+      ansible.builtin.import_tasks: tasks/config.yml
+
+    # --- oude installatie overnemen ---
+    - name: Oude cron weg ({{ legacy_cron_name }})
+      ansible.builtin.cron:
+        name: "{{ legacy_cron_name }}"
+        user: "{{ ansible_user }}"
+        state: absent
+
+    # De cron-module ziet alleen regels met zijn eigen "#Ansible:"-markering. Een met de hand
+    # toegevoegde cron (eerder al eens de oorzaak van een ingetrokken token) blijft anders staan.
+    - name: Andere crons die de oude client nog starten
+      ansible.builtin.shell: |
+        { crontab -l -u {{ ansible_user }} 2>/dev/null; crontab -l -u root 2>/dev/null; cat /etc/crontab /etc/cron.d/* 2>/dev/null; } \
+          | grep -v '^[[:space:]]*#' | grep -E 'volvoAPIClient|volvo_battery_mqtt' || true
+      register: leftover_cron
+      changed_when: false
+      check_mode: false
+
+    - name: Geen andere cron meer voor de oude client
+      ansible.builtin.fail:
+        msg:
+          - "Er start nog een cron de oude client (twee runners = ingetrokken refresh token):"
+          - "{{ leftover_cron.stdout_lines }}"
+          - "Haal die regel weg (crontab -e) en draai install opnieuw."
+      when: leftover_cron.stdout | length > 0 and not ansible_check_mode
+
+    # Een run die nog bezig is, houdt de lock vast; daarna is tokens.json stabiel.
+    # Als {{ ansible_user }}: de lock is van die gebruiker, en in /run/lock (sticky) mag root een
+    # bestand van een ander niet openen (fs.protected_regular).
+    - name: Wachten op een lopende run van de oude cron
+      ansible.builtin.command: flock -w 120 {{ legacy_lock }} true
+      become_user: "{{ ansible_user }}"
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Staat er al een tokens.json in de datamap?
+      ansible.builtin.stat:
+        path: "{{ app_tokens }}"
+      register: new_tokens
+
+    - name: Oude tokens.json
+      ansible.builtin.stat:
+        path: "{{ legacy_dir }}/tokens.json"
+      register: old_tokens
+
+    - name: tokens.json overnemen (eenmalig)
+      ansible.builtin.copy:
+        src: "{{ legacy_dir }}/tokens.json"
+        dest: "{{ app_tokens }}"
+        remote_src: true
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0600"
+      when: not new_tokens.stat.exists and old_tokens.stat.exists
+
+    # --- systemd ---
+    - name: Systemd-service en -timer
+      ansible.builtin.template:
+        src: templates/{{ item }}.j2
+        dest: /etc/systemd/system/{{ item }}
+        owner: root
+        group: root
+        mode: "0644"
+      loop: ["{{ app_name }}.service", "{{ app_name }}.timer"]
+
+    - name: Helperscript volvo-authenticate
+      ansible.builtin.template:
+        src: templates/volvo-authenticate.j2
+        dest: /usr/local/bin/volvo-authenticate
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: systemd herladen
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: not ansible_check_mode
+
+- name: Eerste deploy (zet ook de timer aan)
+  ansible.builtin.import_playbook: deploy.yml

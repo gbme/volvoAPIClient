@@ -1,0 +1,47 @@
+---
+# Terug naar de vorige release (of een specifieke: -e release=20261110-201500).
+# tokens.json en de venv gaan niet mee terug.
+- name: Rollback
+  hosts: volvo_api_client
+  become: true
+
+  tasks:
+    - name: Huidige release
+      ansible.builtin.stat:
+        path: "{{ app_current }}"
+      register: current
+      failed_when: not (current.stat.islnk | default(false))
+
+    - name: Releases opzoeken
+      ansible.builtin.find:
+        paths: "{{ app_releases }}"
+        file_type: directory
+      register: found
+
+    - name: Doel bepalen
+      vars:
+        paths: "{{ found.files | map(attribute='path') | sort }}"
+        older: "{{ paths | select('lt', current.stat.lnk_source) | list }}"
+      ansible.builtin.set_fact:
+        target: "{{ (app_releases ~ '/' ~ release) if release is defined else (older | last | default('')) }}"
+
+    - name: Doel bestaat
+      ansible.builtin.assert:
+        that:
+          - target != ''
+          - target in (found.files | map(attribute='path'))
+        fail_msg: "Geen (geldige) oudere release gevonden. Beschikbaar: {{ found.files | map(attribute='path') | map('basename') | sort | join(', ') }}"
+
+    - name: Symlink omzetten naar {{ target | basename }}
+      ansible.builtin.file:
+        src: "{{ target }}"
+        dest: "{{ app_current }}"
+        state: link
+        force: true
+
+    - name: Controle
+      ansible.builtin.include_tasks: tasks/health.yml
+
+    - name: Klaar
+      ansible.builtin.debug:
+        msg: "Draait nu {{ target | basename }} (was {{ current.stat.lnk_source | basename }})"

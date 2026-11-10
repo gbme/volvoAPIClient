@@ -1,0 +1,10 @@
+# Beheerd door Ansible.
+[Unit]
+Description=Volvo API client elke minuut
+
+[Timer]
+OnCalendar={{ timer_on_calendar }}
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

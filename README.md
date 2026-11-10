@@ -388,3 +388,23 @@ This project is provided as-is for educational and development purposes. Please 
 - [API Documentation](https://developer.volvocars.com/apis/docs/)
 - [OAuth2 Specification](https://datatracker.ietf.org/doc/html/rfc6749)
 - [PKCE Specification](https://www.rfc-editor.org/rfc/rfc7636)# volvoAPIClient
+
+## Deploy (homeserver huis)
+
+Via ansible in `ansible/`, aangesloten op infra (`infra/deploy.sh volvo_api_client …`):
+
+```bash
+ansible/deploy.sh install    # eenmalig: venv, gebruiker volvo, systemd-timer (elke minuut),
+                             # oude cron weg, tokens.json overnemen, eerste deploy
+ansible/deploy.sh deploy     # lokale code als nieuwe release (+ één run als controle)
+ansible/deploy.sh update     # python3 + pip-afhankelijkheden bijwerken
+ansible/deploy.sh rollback   # vorige release
+```
+
+- Op de server: code in `/opt/volvo-api-client/current`, tokens in `/var/lib/volvo-api-client`,
+  config in `/etc/volvo-api-client/volvo.env` (uit de vault `ansible/group_vars/all/vault.yml`,
+  wachtwoord in de sleutelhanger: `volvo-api-client-ansible-vault`), log in
+  `~/logs/volvo_battery_mqtt.log` en `journalctl -u volvo-api-client`.
+- **Opnieuw inloggen** (log zegt `Token refresh failed`): op de server `volvo-authenticate`.
+- Instellingen via de omgeving: `VOLVO_TOKENS_FILE`, `VOLVO_LOG_DIR`, `VOLVO_MQTT_API_URL`,
+  `VOLVO_MQTT_USER`, `VOLVO_MQTT_PASSWORD` (plus de `VOLVO_*`-sleutels uit `.env.example`).

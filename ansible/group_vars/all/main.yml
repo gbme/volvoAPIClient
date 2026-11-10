@@ -1,0 +1,36 @@
+---
+app_name: volvo-api-client
+app_user: volvo                      # systeemgebruiker waaronder de publisher draait
+app_root: /opt/volvo-api-client      # code: releases/<id>, current -> actieve release; venv/
+app_releases: "{{ app_root }}/releases"
+app_current: "{{ app_root }}/current"
+app_venv: "{{ app_root }}/venv"
+app_data: /var/lib/volvo-api-client  # tokens.json (+ .lock/.tmp): refresh token, eenmalig bruikbaar
+app_tokens: "{{ app_data }}/tokens.json"
+app_env_dir: /etc/volvo-api-client
+app_env_file: "{{ app_env_dir }}/volvo.env"
+python_min_version: "3.9"
+
+# Elke minuut; systemd start een oneshot niet opnieuw zolang hij nog loopt (geen flock nodig).
+timer_on_calendar: "*:*:00"
+
+# RabbitMQ management-API (publish op gbme_exchange, routing key volvo.car.<VIN>)
+mqtt_api_url: http://192.168.1.200:15672/api/exchanges/gbme_vhost/gbme_exchange/publish
+
+# Logbestand <log_dir>/volvo_battery_mqtt.log, roteert om middernacht (zelfde conventie als
+# de homeserver-apps en brugserver). De app-gebruiker krijgt via ACL alleen doorgang (--x)
+# door de home van log_owner en schrijfrecht in log_dir.
+log_owner: "{{ ansible_user }}"
+log_dir: "/home/{{ log_owner }}/logs"
+keep_releases: 3
+
+# Oude installatie (cron als gmeijer vanuit ~/volvoAPIClient): install haalt de cron weg en
+# neemt tokens.json eenmalig over, zodat er niet opnieuw ingelogd hoeft te worden.
+legacy_dir: "/home/{{ ansible_user }}/volvoAPIClient"
+legacy_cron_name: volvo api
+legacy_lock: /run/lock/volvo.lock
+
+# Lokaal: projectmap en plek voor het release-archief
+src_dir: "{{ playbook_dir | dirname }}"
+build_dir: "{{ playbook_dir }}/.build"
+release_files: [volvo_api, volvo_battery_mqtt.py, authenticate.py, requirements.txt, README.md]

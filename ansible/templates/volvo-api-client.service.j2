@@ -1,0 +1,26 @@
+# Beheerd door Ansible.
+[Unit]
+Description=Volvo API client: accu/laadstatus/locatie -> RabbitMQ volvo.car.<VIN>
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ app_user }}
+Group={{ app_user }}
+WorkingDirectory={{ app_current }}
+EnvironmentFile={{ app_env_file }}
+ExecStart={{ app_venv }}/bin/python {{ app_current }}/volvo_battery_mqtt.py
+TimeoutStartSec=55
+
+# Hardening: alleen de datamap (tokens) en de logmap zijn schrijfbaar
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths={{ app_data }} {{ log_dir }}

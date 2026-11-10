@@ -1,0 +1,139 @@
+---
+# Nieuwe versie uitrollen: code inpakken -> nieuwe release -> afhankelijkheden in de venv ->
+# importcheck -> symlink omzetten -> timer aan -> één run als controle.
+# Faalt de importcheck, dan blijft de vorige release actief. Een mislukte run (meestal de
+# Volvo-login) draait niets terug; -e allow_failed_run=true laat de deploy dan toch slagen.
+- name: Release bouwen (lokaal)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Release-id
+      ansible.builtin.set_fact:
+        release_id: "{{ lookup('ansible.builtin.pipe', 'date +%Y%m%d-%H%M%S') }}"
+
+    - name: Buildmap
+      ansible.builtin.file:
+        path: "{{ build_dir }}"
+        state: directory
+        mode: "0755"
+
+    # Alleen de code; geen .env, tokens.json, logs of ansible. COPYFILE_DISABLE: geen ._-bestanden.
+    - name: Code inpakken
+      ansible.builtin.command:
+        argv: "{{ ['tar', '-czf', build_dir ~ '/release.tgz', '--exclude=__pycache__', '-C', src_dir] + release_files }}"
+      environment:
+        COPYFILE_DISABLE: "1"
+      changed_when: true
+
+- name: Release uitrollen
+  hosts: volvo_api_client
+  become: true
+  vars:
+    release_id: "{{ hostvars['localhost'].release_id }}"
+    release_dir: "{{ app_releases }}/{{ release_id }}"
+
+  tasks:
+    - name: Server is ingericht
+      ansible.builtin.stat:
+        path: /etc/systemd/system/{{ app_name }}.timer
+      register: unit
+      changed_when: false
+
+    - name: Eerst install
+      ansible.builtin.fail:
+        msg: "Server is nog niet ingericht (geen {{ app_name }}.timer). Eerst: ./deploy.sh install"
+      when: not unit.stat.exists and not ansible_check_mode
+
+    - name: Configuratie
+      ansible.builtin.import_tasks: tasks/config.yml
+
+    - name: Releasemap
+      ansible.builtin.file:
+        path: "{{ release_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+
+    - name: Code uitpakken
+      ansible.builtin.unarchive:
+        src: "{{ build_dir }}/release.tgz"
+        dest: "{{ release_dir }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Code leesbaar voor de app-gebruiker
+      ansible.builtin.file:
+        path: "{{ release_dir }}"
+        mode: u+rwX,go+rX
+        recurse: true
+
+    - name: Afhankelijkheden in de venv
+      ansible.builtin.pip:
+        requirements: "{{ release_dir }}/requirements.txt"
+        virtualenv: "{{ app_venv }}"
+        virtualenv_command: python3 -m venv
+      become_user: "{{ ansible_user }}"
+
+    # Zonder schrijven van __pycache__ in de release.
+    - name: Importcheck
+      ansible.builtin.command:
+        argv: ["{{ app_venv }}/bin/python", "-B", "-c", "import volvo_api, volvo_battery_mqtt, authenticate"]
+        chdir: "{{ release_dir }}"
+      become_user: "{{ ansible_user }}"
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Release-id vastleggen
+      ansible.builtin.copy:
+        content: "{{ release_id }}\n"
+        dest: "{{ release_dir }}/REVISION"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+
+    - name: Symlink naar nieuwe release
+      ansible.builtin.file:
+        src: "{{ release_dir }}"
+        dest: "{{ app_current }}"
+        state: link
+        force: true
+
+    - name: Timer aan
+      ansible.builtin.systemd_service:
+        name: "{{ app_name }}.timer"
+        state: started
+        enabled: true
+        daemon_reload: true
+      ignore_errors: "{{ ansible_check_mode }}"
+
+    - name: Timer actief?
+      ansible.builtin.command: systemctl is-active {{ app_name }}.timer
+      register: timer_state
+      changed_when: false
+      failed_when: timer_state.stdout != 'active' and not ansible_check_mode
+      check_mode: false
+
+    - name: Controle
+      ansible.builtin.include_tasks: tasks/health.yml
+
+    - name: Oude releases opzoeken
+      ansible.builtin.find:
+        paths: "{{ app_releases }}"
+        file_type: directory
+      register: releases
+
+    - name: Oude releases opruimen (laatste {{ keep_releases }} blijven)
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ (releases.files | sort(attribute='path'))[:-(keep_releases | int)] }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: item.path != release_dir
+
+    - name: Klaar
+      ansible.builtin.debug:
+        msg: "Release {{ release_id }} actief; log: {{ log_dir }}/volvo_battery_mqtt.log, journalctl -u {{ app_name }}"

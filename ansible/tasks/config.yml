@@ -1,0 +1,11 @@
+---
+# Configuratie naar de server. Draait bij install én deploy, zodat een gewijzigde
+# instelling of geheim met een gewone deploy meekomt.
+- name: Omgevingsbestand
+  ansible.builtin.template:
+    src: templates/volvo.env.j2
+    dest: "{{ app_env_file }}"
+    owner: root
+    group: "{{ app_user }}"
+    mode: "0640"
+  register: env_file

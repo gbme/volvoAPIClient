@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 import time
 from logging.handlers import TimedRotatingFileHandler
@@ -68,9 +69,13 @@ class VolvoBatteryMQTTPublisher:
     FRIESLAND_LONGITUDE = 5.837393220057187  # Current Friesland coordinates
     FRIESLAND_RADIUS_METERS = 100  # Radius in meters to consider as "Friesland"
 
-    MQTT_API_URL = (
-        "http://192.168.1.200:15672/api/exchanges/gbme_vhost/gbme_exchange/publish"
+    # RabbitMQ management HTTP API; login from the environment (ansible vault -> env file)
+    MQTT_API_URL = os.getenv(
+        "VOLVO_MQTT_API_URL",
+        "http://192.168.1.200:15672/api/exchanges/gbme_vhost/gbme_exchange/publish",
     )
+    MQTT_USER = os.getenv("VOLVO_MQTT_USER")
+    MQTT_PASSWORD = os.getenv("VOLVO_MQTT_PASSWORD")
 
     def __init__(self, test_mode=False, test_auth=False, vins=None):
         """Initialize the publisher
@@ -121,7 +126,7 @@ class VolvoBatteryMQTTPublisher:
         log_format = "%(asctime)s - %(levelname)s - %(message)s"
 
         # Create logs directory next to this script so cron/cwd doesn't matter
-        log_dir = Path(__file__).resolve().parent / "logs"
+        log_dir = Path(os.getenv("VOLVO_LOG_DIR") or Path(__file__).resolve().parent / "logs")
         log_dir.mkdir(exist_ok=True)
 
         # Configure logging
@@ -554,15 +559,16 @@ class VolvoBatteryMQTTPublisher:
                 return True
 
             # Make HTTP POST request to MQTT API with proper headers
-            headers = {
-                "Authorization": "Basic Z2JtZTpwYXNz",
-                "Content-Type": "application/json",
-            }
+            if not (self.MQTT_USER and self.MQTT_PASSWORD):
+                self.logger.error(
+                    "❌ VOLVO_MQTT_USER / VOLVO_MQTT_PASSWORD not set, cannot publish"
+                )
+                return False
 
             response = requests.post(
                 self.MQTT_API_URL,
                 json=mqtt_message,
-                headers=headers,
+                auth=(self.MQTT_USER, self.MQTT_PASSWORD),
                 timeout=10,
             )
 
@@ -685,6 +691,8 @@ class VolvoBatteryMQTTPublisher:
                         self.logger.warning(
                             "⚠️ [%s] Completed with error data published", vin
                         )
+                        # non-zero exit: the systemd timer (and infra health) shows the failure
+                        overall_success = False
                 else:
                     self.logger.error("❌ [%s] Failed - could not publish to MQTT", vin)
                     overall_success = False

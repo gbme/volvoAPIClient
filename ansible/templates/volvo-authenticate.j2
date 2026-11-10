@@ -1,0 +1,8 @@
+#!/bin/sh
+# Beheerd door Ansible. Opnieuw inloggen bij Volvo ID (interactief: URL openen, callback-URL
+# plakken). Nodig als de refresh token verlopen is ("Token refresh failed" in het log).
+#   volvo-authenticate        (vraagt zo nodig om sudo)
+set -eu
+[ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
+exec runuser -u {{ app_user }} -- sh -c 'set -a; . "$1"; set +a; cd "$2"; exec "$3" authenticate.py' \
+  sh {{ app_env_file }} {{ app_current }} {{ app_venv }}/bin/python

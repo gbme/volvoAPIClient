@@ -1,0 +1,32 @@
+---
+# Eén run nu (oneshot: wacht tot hij klaar is). Faalt hij, dan is dat meestal de Volvo-login
+# (refresh token verlopen) en niet de code; daarom geen rollback, wel een duidelijke melding.
+- name: Eén run starten
+  ansible.builtin.systemd_service:
+    name: "{{ app_name }}.service"
+    state: started
+  register: run
+  failed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Resultaat van de run
+  ansible.builtin.command: systemctl show {{ app_name }}.service -p Result --value
+  register: run_result
+  changed_when: false
+  check_mode: false
+
+- name: Laatste regels van de run
+  ansible.builtin.command: journalctl -u {{ app_name }}.service -n 15 --no-pager -o cat
+  register: run_log
+  changed_when: false
+  check_mode: false
+  when: run_result.stdout != 'success'
+
+- name: Run gelukt?
+  ansible.builtin.fail:
+    msg:
+      - "De run faalde ({{ run_result.stdout }}). Laatste regels:"
+      - "{{ run_log.stdout_lines | default([]) }}"
+      - "Staat er 'Token refresh failed' of 'Authentication required': log op de server opnieuw in met volvo-authenticate."
+  when: run_result.stdout != 'success' and not (allow_failed_run | default(false) | bool)

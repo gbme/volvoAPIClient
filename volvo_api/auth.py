@@ -78,7 +78,8 @@ class VolvoAuth:
         ]
         self.use_pkce = use_pkce
         # Resolve relative paths against the project root so cron/cwd doesn't matter
-        token_path = Path(token_storage_path or "tokens.json")
+        # VOLVO_TOKENS_FILE (systemd deploy: data dir outside the release) wins
+        token_path = Path(os.getenv("VOLVO_TOKENS_FILE") or token_storage_path or "tokens.json")
         if not token_path.is_absolute():
             token_path = PROJECT_ROOT / token_path
         self.token_storage_path = str(token_path)
