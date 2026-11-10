@@ -9,6 +9,7 @@ This module handles OAuth2 authentication flow including:
 """
 
 import base64
+import fcntl
 import hashlib
 import json
 import logging
@@ -16,12 +17,20 @@ import os
 import secrets
 import urllib.parse
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
 from .exceptions import AuthenticationError, InvalidTokenError
+
+# Project root (parent of the volvo_api package); relative paths resolve here
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Refresh this long before expiry. Volvo access tokens live ~5 minutes, so a
+# larger buffer would trigger a refresh on every single API call.
+REFRESH_BUFFER = timedelta(seconds=60)
 
 
 class VolvoAuth:
@@ -68,7 +77,11 @@ class VolvoAuth:
             "conve:warnings",
         ]
         self.use_pkce = use_pkce
-        self.token_storage_path = token_storage_path or "tokens.json"
+        # Resolve relative paths against the project root so cron/cwd doesn't matter
+        token_path = Path(token_storage_path or "tokens.json")
+        if not token_path.is_absolute():
+            token_path = PROJECT_ROOT / token_path
+        self.token_storage_path = str(token_path)
 
         # Setup logger for debugging
         self.logger = logging.getLogger(__name__)
@@ -289,11 +302,11 @@ class VolvoAuth:
                 "No access token available. Please authenticate first."
             )
 
-        # Check if token is expired (with 5 minute buffer)
+        # Check if token is expired (with REFRESH_BUFFER margin)
         now = datetime.now()
         if self._token_expires_at:
             time_until_expiry = self._token_expires_at - now
-            buffer_time = self._token_expires_at - timedelta(minutes=5)
+            buffer_time = self._token_expires_at - REFRESH_BUFFER
 
             self.logger.debug(
                 "Checking token expiry: expires at %s, buffer at %s, now is %s",
@@ -310,7 +323,7 @@ class VolvoAuth:
 
                 if self._refresh_token:
                     try:
-                        self.refresh_access_token()
+                        self._refresh_with_lock()
                     except AuthenticationError as exc:
                         self.logger.error(
                             "Token refresh failed, re-authentication required"
@@ -333,6 +346,33 @@ class VolvoAuth:
             )
 
         return self._access_token
+
+    def _refresh_with_lock(self):
+        """
+        Refresh under an exclusive file lock shared by all processes.
+
+        Volvo rotates the refresh token on every refresh, so two processes
+        refreshing with the same token make one of them fail and can leave a
+        revoked token in tokens.json. Under the lock we first reload the file:
+        if another process already refreshed, we just use its token.
+        """
+        lock_path = f"{self.token_storage_path}.lock"
+        with open(lock_path, "w", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                self._load_tokens()
+                if (
+                    self._token_expires_at
+                    and datetime.now() < self._token_expires_at - REFRESH_BUFFER
+                ):
+                    self.logger.info(
+                        "♻️ Token already refreshed by another process (expires: %s)",
+                        self._token_expires_at.isoformat(),
+                    )
+                    return
+                self.refresh_access_token()
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     def is_authenticated(self) -> bool:
         """
@@ -378,8 +418,11 @@ class VolvoAuth:
         }
 
         try:
-            with open(self.token_storage_path, "w", encoding="utf-8") as f:
+            # Write to a temp file and rename, so readers never see a partial file
+            tmp_path = f"{self.token_storage_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(token_data, f, indent=2)
+            os.replace(tmp_path, self.token_storage_path)
             self.logger.debug("💾 Tokens saved to %s", self.token_storage_path)
         except IOError as e:
             self.logger.warning(

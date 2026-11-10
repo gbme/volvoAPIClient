@@ -141,3 +141,5 @@ Thumbs.db
 # Project specific
 tokens.json
 config.json
+tokens.json.lock
+tokens.json.tmp

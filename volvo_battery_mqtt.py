@@ -32,6 +32,7 @@ import logging
 import math
 import sys
 import time
+from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 from pathlib import Path
 
@@ -119,15 +120,20 @@ class VolvoBatteryMQTTPublisher:
         log_level = logging.DEBUG if self.test_mode else logging.INFO
         log_format = "%(asctime)s - %(levelname)s - %(message)s"
 
-        # Create logs directory
-        Path("logs").mkdir(exist_ok=True)
+        # Create logs directory next to this script so cron/cwd doesn't matter
+        log_dir = Path(__file__).resolve().parent / "logs"
+        log_dir.mkdir(exist_ok=True)
 
         # Configure logging
         logging.basicConfig(
             level=log_level,
             format=log_format,
             handlers=[
-                logging.FileHandler("logs/volvo_battery_mqtt.log"),
+                TimedRotatingFileHandler(
+                    log_dir / "volvo_battery_mqtt.log",
+                    when="midnight",
+                    backupCount=5,
+                ),
                 logging.StreamHandler(sys.stdout),
             ],
         )
@@ -460,14 +466,19 @@ class VolvoBatteryMQTTPublisher:
                         heading = properties.get("heading")
 
                         # Check location priority: Friesland -> Home -> Unknown
-                        if vin == "YV1XZEFV9P2111126" and self._is_in_friesland(lat, lon):
+                        if vin == "YV1XZEFV9P2111126" and self._is_in_friesland(
+                            lat, lon
+                        ):
                             # This specific VIN is in Friesland
                             result["location"] = "Friesland"
-                            
+
                             distance_to_friesland = self._calculate_distance(
-                                lat, lon, self.FRIESLAND_LATITUDE, self.FRIESLAND_LONGITUDE
+                                lat,
+                                lon,
+                                self.FRIESLAND_LATITUDE,
+                                self.FRIESLAND_LONGITUDE,
                             )
-                            
+
                             self.logger.info(
                                 "✅ [%s] Location: 🌍 Friesland (%.1fm from center), heading=%s°",
                                 vin,

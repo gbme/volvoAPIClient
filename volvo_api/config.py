@@ -3,6 +3,7 @@ Configuration management for Volvo API client
 """
 
 import os
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -68,6 +69,10 @@ class VolvoConfig:
         Args:
             env_file: Path to environment file
         """
+        # Resolve relative paths against the project root so cron/cwd doesn't matter
+        if not os.path.isabs(env_file):
+            env_file = str(Path(__file__).resolve().parent.parent / env_file)
+
         # Load environment variables
         if os.path.exists(env_file):
             load_dotenv(env_file)
