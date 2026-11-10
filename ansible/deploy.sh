@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Gebruik: ./deploy.sh install|deploy|update|rollback [extra ansible-playbook opties]
+# Gebruik: ./deploy.sh install|deploy|update|rollback|status [extra ansible-playbook opties]
 #   install   server inrichten (venv, gebruiker, mappen, config, systemd-timer, volvo-authenticate),
 #             oude cron weghalen + tokens.json overnemen, en eerste deploy
+#             (-e take_over_tokens=true: tokens.json opnieuw overnemen van ~/volvoAPIClient)
 #   deploy    huidige lokale code uitrollen als nieuwe release (+ één run als controle)
 #   update    python3 en de pip-afhankelijkheden bijwerken
 #   rollback  terug naar vorige release (of: rollback -e release=<id>)
+#   status    alleen lezen: timer, laatste run, tokens, laatste logregels (-e lines=80)
 # Opnieuw inloggen bij Volvo ID (interactief) doe je op de server: volvo-authenticate
 # Vault-wachtwoord: uit de macOS-sleutelhanger als dat is ingesteld (zie vault-pass.sh),
 # anders wordt het gevraagd. ANSIBLE_VAULT_PASSWORD_FILE of eigen vault-opties gaan voor.
@@ -13,8 +15,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 cmd="${1:-}"
 case "$cmd" in
-  install|deploy|update|rollback) shift ;;
-  *) sed -n '2,10p' "$0" >&2; exit 1 ;;
+  install|deploy|update|rollback|status) shift ;;
+  *) sed -n '2,12p' "$0" >&2; exit 1 ;;
 esac
 
 if [ "$cmd" = deploy ] || [ "$cmd" = install ]; then

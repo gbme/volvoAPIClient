@@ -394,7 +394,7 @@ This project is provided as-is for educational and development purposes. Please 
 Via ansible in `ansible/`, aangesloten op infra (`infra/deploy.sh volvo_api_client …`):
 
 ```bash
-ansible/deploy.sh install    # eenmalig: venv, gebruiker volvo, systemd-timer (elke minuut),
+ansible/deploy.sh install    # eenmalig: venv, systemd-timer (elke minuut, als gmeijer),
                              # oude cron weg, tokens.json overnemen, eerste deploy
 ansible/deploy.sh deploy     # lokale code als nieuwe release (+ één run als controle)
 ansible/deploy.sh update     # python3 + pip-afhankelijkheden bijwerken

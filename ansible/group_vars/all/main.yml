@@ -1,6 +1,6 @@
 ---
 app_name: volvo-api-client
-app_user: volvo                      # systeemgebruiker waaronder de publisher draait
+app_user: "{{ ansible_user }}"       # de publisher draait als gmeijer (eigenaar van ~/logs, net als de oude cron)
 app_root: /opt/volvo-api-client      # code: releases/<id>, current -> actieve release; venv/
 app_releases: "{{ app_root }}/releases"
 app_current: "{{ app_root }}/current"
@@ -18,7 +18,7 @@ timer_on_calendar: "*:*:00"
 mqtt_api_url: http://192.168.1.200:15672/api/exchanges/gbme_vhost/gbme_exchange/publish
 
 # Logbestand <log_dir>/volvo_battery_mqtt.log, roteert om middernacht (zelfde conventie als
-# de homeserver-apps en brugserver). De app-gebruiker krijgt via ACL alleen doorgang (--x)
+# de homeserver-apps). Is app_user een ander dan log_owner, dan krijgt die via ACL doorgang
 # door de home van log_owner en schrijfrecht in log_dir.
 log_owner: "{{ ansible_user }}"
 log_dir: "/home/{{ log_owner }}/logs"
@@ -29,6 +29,7 @@ keep_releases: 3
 legacy_dir: "/home/{{ ansible_user }}/volvoAPIClient"
 legacy_cron_name: volvo api
 legacy_lock: /run/lock/volvo.lock
+legacy_app_user: volvo               # gebruiker van de eerste installatie; install haalt hem weg
 
 # Lokaal: projectmap en plek voor het release-archief
 src_dir: "{{ playbook_dir | dirname }}"

@@ -1,0 +1,46 @@
+---
+# Alleen lezen: timer, laatste run, tokens en de laatste logregels. Verandert niets.
+#   ./deploy.sh status            (-e lines=80 voor meer regels)
+- name: Status
+  hosts: volvo_api_client
+  become: true
+  gather_facts: false
+  vars:
+    lines: 30
+
+  tasks:
+    - name: Timer en service
+      ansible.builtin.command: >-
+        systemctl show {{ app_name }}.timer {{ app_name }}.service
+        -p Id -p ActiveState -p UnitFileState -p Result -p ExecMainStatus
+        -p LastTriggerUSec -p NextElapseUSecRealtime
+      register: units
+      changed_when: false
+      check_mode: false
+
+    - name: Release en tokens
+      ansible.builtin.shell: |
+        echo "release: $(cat {{ app_current }}/REVISION 2>/dev/null || echo '-')"
+        stat -c 'tokens: %U:%G %a %s bytes, gewijzigd %y' {{ app_tokens }} 2>/dev/null || echo "tokens: ontbreekt ({{ app_tokens }})"
+      register: files
+      changed_when: false
+      check_mode: false
+
+    - name: Laatste logregels
+      ansible.builtin.command: journalctl -u {{ app_name }}.service -n {{ lines }} --no-pager -o short-iso
+      register: log
+      changed_when: false
+      check_mode: false
+
+    - name: Logbestand
+      ansible.builtin.shell: |
+        f={{ log_dir }}/volvo_battery_mqtt.log
+        if [ -f "$f" ]; then stat -c "logbestand: $f (%U, %s bytes, gewijzigd %y)" "$f"; tail -n 10 "$f"
+        else echo "logbestand: $f ontbreekt"; fi
+      register: logfile
+      changed_when: false
+      check_mode: false
+
+    - name: Status
+      ansible.builtin.debug:
+        msg: "{{ units.stdout_lines + [''] + files.stdout_lines + [''] + logfile.stdout_lines + ['', 'journal:'] + log.stdout_lines }}"

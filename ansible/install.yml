@@ -32,6 +32,7 @@
         fail_msg: "python3 {{ python_version.stdout }} is te oud, minimaal {{ python_min_version }}"
 
     - name: Systeemgebruiker {{ app_user }}
+      when: app_user != ansible_user
       ansible.builtin.user:
         name: "{{ app_user }}"
         system: true
@@ -57,13 +58,46 @@
         mode: "0755"
       loop: ["{{ app_releases }}", "{{ app_venv }}"]
 
+    # recurse: ook tokens.json van een eerdere installatie onder een andere gebruiker
     - name: Datamap (tokens)
       ansible.builtin.file:
         path: "{{ app_data }}"
         state: directory
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
-        mode: "0700"
+        mode: u=rwX,go=
+        recurse: true
+
+    # --- gebruiker van de eerste installatie (volvo) opruimen: eerst de ACL's, dan de gebruiker.
+    # Zijn home was de datamap; die blijft staan (remove: false) en is hierboven al van app_user.
+    - name: Bestaat de oude gebruiker {{ legacy_app_user }} nog?
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ legacy_app_user }}"
+      register: legacy_user
+      failed_when: false
+      when: app_user != legacy_app_user
+
+    - name: ACL's van {{ legacy_app_user }} weg
+      ansible.posix.acl:
+        path: "{{ item.path }}"
+        entity: "{{ legacy_app_user }}"
+        etype: user
+        default: "{{ item.default }}"
+        state: absent
+      loop:
+        - {path: "{{ log_dir | dirname }}", default: false}
+        - {path: "{{ log_dir }}", default: false}
+        - {path: "{{ log_dir }}", default: true}
+      loop_control: { label: "{{ item.path }}{{ ' (default)' if item.default else '' }}" }
+      when: app_user != legacy_app_user and (legacy_user.ansible_facts | default({})).getent_passwd is defined
+
+    - name: Oude gebruiker {{ legacy_app_user }} weg
+      ansible.builtin.user:
+        name: "{{ legacy_app_user }}"
+        state: absent
+        remove: false
+      when: app_user != legacy_app_user and (legacy_user.ansible_facts | default({})).getent_passwd is defined
 
     - name: Bestaat de logmap al?
       ansible.builtin.stat:
@@ -80,6 +114,7 @@
       when: not log_dir_stat.stat.exists
 
     - name: Doorgang door de home van {{ log_owner }}
+      when: app_user != log_owner
       ansible.posix.acl:
         path: "{{ log_dir | dirname }}"
         entity: "{{ app_user }}"
@@ -88,6 +123,7 @@
         state: present
 
     - name: Schrijfrecht in de logmap
+      when: app_user != log_owner
       ansible.posix.acl:
         path: "{{ log_dir }}"
         entity: "{{ app_user }}"
@@ -96,6 +132,7 @@
         state: present
 
     - name: Standaard-ACL in de logmap
+      when: app_user != log_owner
       ansible.posix.acl:
         path: "{{ log_dir }}"
         entity: "{{ item }}"
@@ -160,15 +197,44 @@
         path: "{{ legacy_dir }}/tokens.json"
       register: old_tokens
 
-    - name: tokens.json overnemen (eenmalig)
+    # Eenmalig, of opnieuw met -e take_over_tokens=true (de oude client is daarna nog met de hand
+    # gedraaid en heeft de refresh token vernieuwd: dan is alleen de oude kopie nog geldig).
+    - name: Overnemen?
+      ansible.builtin.set_fact:
+        tokens_take_over: "{{ old_tokens.stat.exists and (not new_tokens.stat.exists or (take_over_tokens | default(false) | bool)) }}"
+
+    # Geen run van de nieuwe service tijdens het overnemen (die zou met de oude token verversen).
+    - name: Timer stoppen voor het overnemen
+      ansible.builtin.systemd_service:
+        name: "{{ app_name }}.timer"
+        state: stopped
+      when: tokens_take_over and new_tokens.stat.exists
+
+    - name: Wachten tot een lopende run klaar is
+      ansible.builtin.command: systemctl is-active {{ app_name }}.service
+      register: svc_state
+      until: svc_state.stdout not in ['active', 'activating']
+      retries: 30
+      delay: 2
+      failed_when: false
+      changed_when: false
+      when: tokens_take_over and new_tokens.stat.exists and not ansible_check_mode
+
+    - name: tokens.json overnemen
       ansible.builtin.copy:
         src: "{{ legacy_dir }}/tokens.json"
         dest: "{{ app_tokens }}"
         remote_src: true
+        force: true
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
         mode: "0600"
-      when: not new_tokens.stat.exists and old_tokens.stat.exists
+      when: tokens_take_over
+
+    # Daarna kan de oude client niet meer verversen: één keten van refresh tokens, één gebruiker.
+    - name: Oude tokens.json parkeren (oude client werkt dan niet meer)
+      ansible.builtin.command: mv {{ legacy_dir }}/tokens.json {{ legacy_dir }}/tokens.json.migrated
+      when: tokens_take_over and not ansible_check_mode
 
     # --- systemd ---
     - name: Systemd-service en -timer
