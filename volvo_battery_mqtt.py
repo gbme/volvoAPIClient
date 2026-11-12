@@ -180,8 +180,9 @@ class VolvoBatteryMQTTPublisher:
                 "charger_connected": None,
                 "charging_type": None,
                 "source": None,
-                # Location data - simplified to just 'home' or 'unknown'
-                "location": "unknown",
+                # 'home' | 'Friesland' | 'unknown' (away); None = location API gave nothing,
+                # so the homeserver keeps the last known location
+                "location": None,
             }
 
             # Try energy state first (Energy API v2) - comprehensive data
@@ -514,16 +515,13 @@ class VolvoBatteryMQTTPublisher:
                             )
                         return
 
-                # No valid coordinates found
-                self.logger.debug("No valid coordinates found in response")
-                result["location"] = "unknown"
+                # No valid coordinates found: leave location None (not "away")
+                self.logger.warning("No valid coordinates in location response for %s", vin)
             else:
-                self.logger.debug("No location data available")
-                result["location"] = "unknown"
+                self.logger.warning("No location data available for %s", vin)
 
         except Exception as e:
-            self.logger.debug("Location API failed: %s", str(e))
-            result["location"] = "unknown"
+            self.logger.warning("Location API failed for %s: %s", vin, str(e))
 
     def publish_to_mqtt(self, data: dict) -> bool:
         """
